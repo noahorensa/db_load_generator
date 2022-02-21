@@ -8,6 +8,8 @@
 #include <sync_condition.h>
 #include <chrono>
 
+#define MB ((size_t) (1024 * 1024))
+
 using namespace spl;
 
 enum class DB {
@@ -26,6 +28,8 @@ static struct {
     const char *table = nullptr;
 
     size_t threads = 1;
+
+    size_t maxMemory = 128 * MB;
 
     bool loadCsv = false;
     const char *csvPath;
@@ -83,6 +87,11 @@ bool parseArguments(int argc, char **argv) {
             ++i;
             if (i == argc) return false;
             args.threads = atoi(argv[i]);
+        }
+        else if (strcmp(argv[i], "--memory") == 0) {
+            ++i;
+            if (i == argc) return false;
+            args.maxMemory = (size_t) atoi(argv[i]) * MB;
         }
         else if (strcmp(argv[i], "--load-csv") == 0) {
             args.loadCsv = true;
@@ -240,18 +249,24 @@ void loadCsvData() {
     std::cout << "Preparing to load CSV data into table '" << args.table << "'\n";
 
     ThreadPool pool(args.threads);
-    SynchronizationCondition cond;
+    SynchronizationCondition tasks;
+    SynchronizationCondition memory(args.maxMemory);
 
     auto files = File::list(args.csvPath);
 
     auto start = std::chrono::high_resolution_clock::now();
 
     for (const auto &p : files) {
+        memory.wait();
+        PathInfo pInfo(p);
+        memory.increase(pInfo.length());
+
         std::cout << "Reading file " << p.get() << '\n';
 
         for (auto chunk : CSV::read(p.get(), *args.csvOptions)) {
-            cond.begin();
-            pool.run([chunk, &cond] (auto) {
+            tasks.increase(1);
+            memory.increase(chunk->memorySize());
+            pool.run([chunk, &tasks, &memory] (auto) {
                 try {
                     instantiateDB();
 
@@ -268,21 +283,21 @@ void loadCsvData() {
                     std::cerr << "An unknown exception occurred while loading CSV file\n";
                 }
 
+                memory.decrease(chunk->memorySize());
                 delete chunk;
-                cond.end();
+                tasks.decrease(1);
             });
         }
+
+        memory.decrease(pInfo.length());
     }
 
-    auto readEnd = std::chrono::high_resolution_clock::now();
-
-    cond.wait();
+    tasks.wait();
     pool.terminate();
     closeAllConnections();
 
     auto loadEnd = std::chrono::high_resolution_clock::now();
 
-    std::cout << "Finished CSV read in " << (readEnd - start).count() / 1e9 << "\n";
     std::cout << "Finished data loading in " << (loadEnd - start).count() / 1e9 << "\n";
 }
 

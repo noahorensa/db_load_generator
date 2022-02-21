@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <stdlib.h>
+#include <malloc.h>
 
 enum class DataType {
     UINT8,
@@ -22,6 +23,10 @@ struct ColumnChunk {
     DataType type;
     void *data;
     size_t size;
+
+    size_t memorySize() const {
+        return malloc_usable_size(data);
+    }
 };
 
 struct ColumnarTableChunk {
@@ -59,6 +64,14 @@ struct ColumnarTableChunk {
 
     size_t numColumns() const {
         return columns.size();
+    }
+
+    size_t memorySize() const {
+        size_t s = 0;
+        for (const auto &c : columns) {
+            s += c.memorySize();
+        }
+        return s;
     }
 };
  
