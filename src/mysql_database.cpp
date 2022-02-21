@@ -96,8 +96,6 @@ void MySQLDatabase::loadIntoTable(
         case DataType::STRING:
             bind[i].buffer = chunk->columns[i].data;
             bind[i].buffer_type = MYSQL_TYPE_STRING;
-            bind[i].u.indicator = new char[1];
-            bind[i].u.indicator[0] = STMT_INDICATOR_NTS;
             inc[i] += sizeof(char *);
             break;
 
@@ -117,11 +115,6 @@ void MySQLDatabase::loadIntoTable(
         if (mysql_stmt_execute(stmt)) {
             auto e = DynamicMessageError(mysql_stmt_error(stmt));
 
-            for (size_t i = 0; i < chunk->numColumns(); ++i) {
-                if (bind[i].u.indicator != nullptr) {
-                    delete[] bind[i].u.indicator;
-                }
-            }
             delete[] bind;
 
             mysql_stmt_close(stmt);
@@ -134,11 +127,6 @@ void MySQLDatabase::loadIntoTable(
         }
     }
 
-    for (size_t i = 0; i < chunk->numColumns(); ++i) {
-        if (bind[i].u.indicator != nullptr) {
-            delete[] bind[i].u.indicator;
-        }
-    }
     delete[] bind;
 
     mysql_stmt_close(stmt);
