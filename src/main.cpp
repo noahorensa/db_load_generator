@@ -32,8 +32,12 @@ static struct {
     size_t maxMemory = 128 * MB;
 
     bool loadCsv = false;
-    const char *csvPath;
-    CSVOptions *csvOptions;
+    const char *csvPath = nullptr;
+    CSVOptions *csvOptions = nullptr;
+
+    bool runQueries = false;
+    const char *queryPath = nullptr;
+    const char *queryStatPath = "result";
 } args;
 
 static std::mutex _connectionsMtx;
@@ -188,6 +192,22 @@ bool parseArguments(int argc, char **argv) {
 
             args.csvOptions->header = false;
         }
+        else if (strcmp(argv[i], "--run") == 0) {
+            ++i;
+            if (i == argc) return false;
+            args.runQueries = true;
+            args.queryPath = argv[i];
+        }
+        else if (strcmp(argv[i], "--results-file") == 0) {
+            if (! args.runQueries) {
+                std::cerr << "Option --results-file must follow a --run option\n";
+                return false;
+            }
+
+            ++i;
+            if (i == argc) return false;
+            args.queryStatPath = argv[i];
+        }
         else {
             std::cerr << "Unknown option '" << argv[i] << "'\n";
             return false;
@@ -270,7 +290,7 @@ void loadCsvData() {
                 try {
                     instantiateDB();
 
-                    std::cout << "Loading data chunk("
+                    std::cout << "Loading data chunk ("
                         << chunk->size() << " rows) into table '"
                         << args.table << "'\n";
 
@@ -301,11 +321,139 @@ void loadCsvData() {
     std::cout << "Finished data loading in " << (loadEnd - start).count() / 1e9 << "\n";
 }
 
+List<std::string> * readQueries(const Path &path) {
+    auto queries = new List<std::string>();
+    
+    File f(path);
+    auto buf = new char[f.info().length() + 1];
+    f.read(buf, f.info().length());
+
+    std::stringstream s;
+
+    auto p = buf;
+    while (*p != '\0') {
+        // ignore empty lines
+        while (*p == '\n') ++p;
+
+        // ignore lines starting with --
+        if (strncmp(p, "--", 2) == 0) {
+            while (*p != '\0' && *p != '\n') ++p;
+            continue;
+        }
+
+        while (*p != '\0' && *p != '\n' && *p != ';') {
+            s << *p;
+            ++p;
+        }
+        if (*p == '\n') {
+            s << *p;
+            ++p;
+        }
+        else if (*p == ';') {
+            ++p;
+            queries->append(s.str());
+            s = std::stringstream();
+        }
+    }
+
+    delete[] buf;
+
+    return queries;
+}
+
+void runQueries() {
+    std::cout << "Preparing to run benchmark queries\n";
+
+    std::atomic<size_t> queryCount = 0;
+
+    auto files = File::list(args.queryPath);
+
+    List<List<std::string> *> streams;
+
+    for (const auto &p : files) {
+        std::cout << "Reading query file " << p.get() << "\n";
+
+        auto queries = readQueries(p);
+        queryCount += queries->size();
+        streams.append(queries);
+    }
+
+    std::cout << "Running " << streams.size() << " query streams using " << args.threads << " threads\n";
+
+    ThreadPool pool(args.threads);
+    SynchronizationCondition tasks;
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    size_t streamIndex = 0;
+    for (auto s : streams) {
+        tasks.increase(1);
+        pool.run([streamIndex, s, &tasks, &queryCount] (auto) {
+            std::cout << "Running query stream " << streamIndex << "\n";
+
+            try {
+                instantiateDB();
+            }
+            catch (const std::exception &e) {
+                std::cerr << e.what() << "\n";
+                delete s;
+                tasks.decrease(1);
+                return;
+            }
+            catch (...) {
+                std::cerr << "An unknown exception occurred while loading CSV file\n";
+                delete s;
+                tasks.decrease(1);
+                return;
+            }
+
+            for (const auto &q : *s) {
+                try {
+                    db->query(q);
+                }
+                catch (const std::exception &e) {
+                    std::cerr << e.what() << "\n";
+                    --queryCount;
+                }
+                catch (...) {
+                    std::cerr << "An unknown exception occurred while loading CSV file\n";
+                    --queryCount;
+                }
+            }
+
+            delete s;
+            tasks.decrease(1);
+        });
+
+        ++streamIndex;
+    }
+
+    tasks.wait();
+    auto end = std::chrono::high_resolution_clock::now();
+
+    closeAllConnections();
+    pool.terminate();
+
+    double queryTime = (end - start).count() / 1e9;
+
+    std::cout << "Finished " << queryCount
+        << " queries in " << queryTime
+        << " seconds\n";
+
+    std::stringstream stat;
+    stat << queryCount << ',' << queryTime;
+    auto statStr = stat.str();
+    File statFile(args.queryStatPath);
+    statFile.open(File::READ_WRITE | File::CREATE | File::TRUNCATE);
+    statFile.write(statStr.data(), statStr.size());
+}
+
 int main(int argc, char **argv) {
 
     if (! parseArguments(argc - 1, argv + 1)) exit(1);
 
     if (args.loadCsv) loadCsvData();
+    if (args.runQueries) runQueries();
 
     exit(0);
 }

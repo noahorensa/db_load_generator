@@ -19,7 +19,22 @@ MySQLDatabase::~MySQLDatabase() {
 }
 
 void MySQLDatabase::query(const std::string &sql) const {
-
+    if (mysql_query(_conn(), sql.c_str())) {
+        auto e = DynamicMessageError(mysql_error(_conn()));
+        mysql_reset_connection(_conn());
+        throw e;
+    }
+    else {
+        auto result = mysql_store_result(_conn());
+        if (result) {
+            mysql_free_result(result);
+        }
+        else if (mysql_field_count(_conn()) != 0) {
+            auto e = DynamicMessageError(mysql_error(_conn()));
+            mysql_reset_connection(_conn());
+            throw e;
+        }
+    }
 }
 
 void MySQLDatabase::loadIntoTable(
