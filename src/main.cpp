@@ -211,8 +211,8 @@ bool parseArguments(int argc, char **argv) {
             args.testQueryLimit = true;
         }
         else if (strcmp(argv[i], "--results-file") == 0) {
-            if (! args.runQueries) {
-                std::cerr << "Option --results-file must follow a --run option\n";
+            if (! args.runQueries && ! args.testQueryLimit) {
+                std::cerr << "Option --results-file must follow a --run or a --test-query-limit option\n";
                 return false;
             }
 
