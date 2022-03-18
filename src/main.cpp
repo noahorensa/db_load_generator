@@ -31,6 +31,8 @@ static struct {
 
     size_t maxMemory = 128 * MB;
 
+    size_t duration = 1;
+
     bool loadCsv = false;
     const char *csvPath = nullptr;
     CSVOptions *csvOptions = nullptr;
@@ -38,6 +40,8 @@ static struct {
     bool runQueries = false;
     const char *queryPath = nullptr;
     const char *queryStatPath = "result";
+
+    bool testQueryLimit = false;
 } args;
 
 static std::mutex _connectionsMtx;
@@ -96,6 +100,11 @@ bool parseArguments(int argc, char **argv) {
             ++i;
             if (i == argc) return false;
             args.maxMemory = (size_t) atoi(argv[i]) * MB;
+        }
+        else if (strcmp(argv[i], "--duration") == 0) {
+            ++i;
+            if (i == argc) return false;
+            args.duration = (size_t) atoi(argv[i]);
         }
         else if (strcmp(argv[i], "--load-csv") == 0) {
             args.loadCsv = true;
@@ -197,6 +206,9 @@ bool parseArguments(int argc, char **argv) {
             if (i == argc) return false;
             args.runQueries = true;
             args.queryPath = argv[i];
+        }
+        else if (strcmp(argv[i], "--test-query-limit") == 0) {
+            args.testQueryLimit = true;
         }
         else if (strcmp(argv[i], "--results-file") == 0) {
             if (! args.runQueries) {
@@ -448,12 +460,102 @@ void runQueries() {
     statFile.write(statStr.data(), statStr.size());
 }
 
+void testQueryLimit() {
+    std::cout << "Running query limit test using " << args.threads << " threads\n";
+
+    ThreadPool pool(args.threads);
+    SynchronizationCondition tasks;
+
+    for (size_t i = 0; i < args.threads; ++i) {
+        tasks.increase(1);
+        pool.run([&tasks] (auto) {
+            try {
+                instantiateDB();
+            }
+            catch (const std::exception &e) {
+                std::cerr << e.what() << "\n";
+                tasks.decrease(1);
+                return;
+            }
+            catch (...) {
+                std::cerr << "An unknown exception occurred while attempting to connect\n";
+                tasks.decrease(1);
+                return;
+            }
+            tasks.decrease(1);
+        });
+    }
+    tasks.wait();
+
+    auto start = std::chrono::high_resolution_clock::now();
+    auto timeup = start + std::chrono::seconds(args.duration);
+    std::atomic<size_t> queryCount = 0;
+    std::atomic<size_t> latency = 0;
+    for (size_t i = 0; i < args.threads; ++i) {
+        tasks.increase(1);
+        pool.run([&tasks, &start, timeup, &queryCount, &latency] (auto) {
+            std::chrono::high_resolution_clock::time_point qStart, qEnd;
+
+            size_t count = 0;
+            std::chrono::high_resolution_clock::duration latencySum;
+
+            try {
+                do {
+                    qStart = std::chrono::high_resolution_clock::now();
+
+                    db->query("SELECT @@autocommit");
+
+                    qEnd = std::chrono::high_resolution_clock::now();
+
+                    latencySum += qEnd - qStart;
+                    ++count;
+                } while (qEnd < timeup);
+            }
+            catch (const std::exception &e) {
+                std::cerr << e.what() << "\n";
+                tasks.decrease(1);
+                return;
+            }
+            catch (...) {
+                std::cerr << "An unknown exception occurred\n";
+                tasks.decrease(1);
+                return;
+            }
+
+            latency += latencySum.count();
+            queryCount += count;
+
+            tasks.decrease(1);
+        });
+    }
+    tasks.wait();
+    auto end = std::chrono::high_resolution_clock::now();
+
+    closeAllConnections();
+    pool.terminate();
+
+    double queryTime = (end - start).count() / 1e9;
+    double avgLatency = latency / queryCount / 1e9;
+
+    std::cout << "Finished " << queryCount
+        << " queries in " << queryTime
+        << " seconds (" << avgLatency << " seconds latency)\n";
+
+    std::stringstream stat;
+    stat << queryCount << ',' << queryTime << ',' << avgLatency;
+    auto statStr = stat.str();
+    File statFile(args.queryStatPath);
+    statFile.open(File::READ_WRITE | File::CREATE | File::TRUNCATE);
+    statFile.write(statStr.data(), statStr.size());
+}
+
 int main(int argc, char **argv) {
 
     if (! parseArguments(argc - 1, argv + 1)) exit(1);
 
     if (args.loadCsv) loadCsvData();
     if (args.runQueries) runQueries();
+    if (args.testQueryLimit) testQueryLimit();
 
     exit(0);
 }
